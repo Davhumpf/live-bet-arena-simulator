@@ -1,0 +1,5 @@
+spring:
+  application:
+    name: match-simulator
+  config:
+    import: classpath:arena.yml

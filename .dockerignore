@@ -1,0 +1,7 @@
+**/target
+.git
+.env
+artifacts
+**/*.log
+node_modules
+legacy

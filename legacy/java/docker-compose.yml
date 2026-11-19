@@ -1,0 +1,146 @@
+name: live-bet-arena
+x-app: &app
+  restart: unless-stopped
+  environment: &env
+    DB_PASSWORD: ${DB_PASSWORD:?Define DB_PASSWORD en .env}
+    RABBIT_PASSWORD: ${RABBIT_PASSWORD:?Define RABBIT_PASSWORD en .env}
+    DEMO_PASSWORD: ${DEMO_PASSWORD:?Define DEMO_PASSWORD en .env}
+    ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Define ADMIN_PASSWORD en .env}
+  networks: [arena]
+  depends_on:
+    postgres: {condition: service_healthy}
+    kafka: {condition: service_healthy}
+    rabbitmq: {condition: service_healthy}
+  deploy:
+    resources:
+      limits: {cpus: '0.75', memory: 512M}
+services:
+  postgres:
+    image: postgres:16.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: arena
+      POSTGRES_USER: arena
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Define DB_PASSWORD en .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infrastructure/postgres:/docker-entrypoint-initdb.d:ro
+    networks: [arena]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U arena -d arena']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    deploy:
+      resources:
+        limits: {cpus: '1', memory: 512M}
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.7.1
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-log:/var/lib/zookeeper/log
+    networks: [arena]
+    healthcheck:
+      test: [CMD-SHELL, 'cub zk-ready localhost:2181 5']
+      interval: 10s
+      timeout: 10s
+      retries: 20
+    deploy:
+      resources:
+        limits: {cpus: '0.5', memory: 512M}
+  kafka:
+    image: confluentinc/cp-kafka:7.7.1
+    restart: unless-stopped
+    depends_on:
+      zookeeper: {condition: service_healthy}
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+      KAFKA_LOG_RETENTION_HOURS: -1
+    volumes: [kafka-data:/var/lib/kafka/data]
+    networks: [arena]
+    healthcheck:
+      test: [CMD-SHELL, 'kafka-topics --bootstrap-server localhost:9092 --list >/dev/null']
+      interval: 10s
+      timeout: 10s
+      retries: 25
+    deploy:
+      resources:
+        limits: {cpus: '1', memory: 1G}
+  rabbitmq:
+    build: ./infrastructure/rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: arena
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASSWORD:?Define RABBIT_PASSWORD en .env}
+    volumes: [rabbit-data:/var/lib/rabbitmq]
+    networks: [arena]
+    healthcheck:
+      test: [CMD, rabbitmq-diagnostics, -q, check_running]
+      interval: 10s
+      timeout: 10s
+      retries: 25
+    deploy:
+      resources:
+        limits: {cpus: '1', memory: 768M}
+  match-generator:
+    <<: *app
+    build:
+      context: .
+      dockerfile: match-generator/Dockerfile
+      args: {SERVICE: match-generator}
+  betting-api:
+    <<: *app
+    build:
+      context: .
+      dockerfile: betting-api/Dockerfile
+      args: {SERVICE: betting-api}
+  match-simulator:
+    <<: *app
+    build:
+      context: .
+      dockerfile: match-simulator/Dockerfile
+      args: {SERVICE: match-simulator}
+  results-engine:
+    <<: *app
+    build:
+      context: .
+      dockerfile: results-engine/Dockerfile
+      args: {SERVICE: results-engine}
+  dashboard-backend:
+    <<: *app
+    build:
+      context: .
+      dockerfile: dashboard-backend/Dockerfile
+      args: {SERVICE: dashboard-backend}
+    ports: ['127.0.0.1:${HTTP_PORT:-8080}:8080']
+  email-worker:
+    <<: *app
+    build:
+      context: .
+      dockerfile: email-worker/Dockerfile
+      args: {SERVICE: email-worker}
+    deploy:
+      replicas: 2
+      resources:
+        limits: {cpus: '0.5', memory: 384M}
+volumes:
+  postgres-data:
+  kafka-data:
+  rabbit-data:
+  zookeeper-data:
+  zookeeper-log:
+networks:
+  arena:
+    driver: bridge

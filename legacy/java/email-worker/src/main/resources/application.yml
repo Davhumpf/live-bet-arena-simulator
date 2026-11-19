@@ -1,0 +1,5 @@
+spring:
+  application:
+    name: email-worker
+  config:
+    import: classpath:arena.yml

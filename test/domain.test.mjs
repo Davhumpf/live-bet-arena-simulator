@@ -1,0 +1,28 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {Arena,cents,winnerFor} from '../shared/domain.mjs';
+const created={event_id:'created:m1',event_type:'MATCH_CREATED',match_id:'m1',teams:['A','B'],occurred_at:'2026-01-01T00:00:00.000Z',closes_at:'2026-01-01T00:01:00.000Z'};
+const bet=(id='b1',overrides={})=>({event_id:`bet:${id}`,event_type:'BET_PLACED',match_id:'m1',user_id:'u555',bet_id:id,request_id:id,bet_on:'HOME',amount:100,occurred_at:'2026-01-01T00:00:10.000Z',...overrides});
+const finish={event_id:'finish:m1',event_type:'MATCH_FINISHED',match_id:'m1',winner:'HOME',occurred_at:created.closes_at};
+function arena(){const state=new Arena();state.apply(created);return state;}
+test('creation opens a match',()=>assert.equal(arena().matches.get('m1').status,'OPEN_FOR_BETS'));
+test('MATCH_FINISHED closes the canonical aggregate',()=>{const state=arena();state.apply(finish);assert.equal(state.matches.get('m1').status,'CLOSED');assert.equal(state.snapshot('u555').matches[0].status,'FINISHED');});
+test('valid bet debits integer points',()=>{const state=arena();state.apply(bet());assert.equal(state.users.get('u555').balanceCents,990000);});
+test('win returns twice stake including principal',()=>{const state=arena();state.apply(bet());const effects=state.apply(finish);assert.equal(state.users.get('u555').balanceCents,1010000);assert.equal(state.bets.get('b1').status,'WON');assert.ok(effects.some(e=>e.key==='notify.email.win'));});
+test('loss has no payout',()=>{const state=arena();state.apply(bet('b1',{bet_on:'AWAY'}));state.apply(finish);assert.equal(state.users.get('u555').balanceCents,990000);assert.equal(state.bets.get('b1').status,'LOST');});
+test('exact deadline rejects',()=>{const state=arena();state.apply(bet('late',{occurred_at:created.closes_at}));assert.equal(state.bets.get('late').status,'REJECTED');assert.equal(state.users.get('u555').balanceCents,1000000);});
+test('finish before bet rejects even old timestamp',()=>{const state=arena();state.apply(finish);state.apply(bet());assert.equal(state.bets.get('b1').status,'REJECTED');});
+test('insufficient balance rejects without debit',()=>{const state=arena();state.apply(bet('big',{amount:10001}));assert.equal(state.users.get('u555').balanceCents,1000000);assert.equal(state.bets.get('big').reason,'Saldo insuficiente');});
+test('unknown user rejects',()=>{const state=arena();state.apply(bet('x',{user_id:'unknown'}));assert.equal(state.bets.get('x').status,'REJECTED');});
+test('duplicate bet has no side effects',()=>{const state=arena();state.apply(bet());const hash=state.digest();assert.deepEqual(state.apply(bet()),[]);assert.equal(state.digest(),hash);});
+test('duplicate finish never credits again',()=>{const state=arena();state.apply(bet());state.apply(finish);const hash=state.digest();state.apply(finish);assert.equal(state.digest(),hash);assert.equal(state.ledger.length,2);});
+test('different event with same result still does not settle twice',()=>{const state=arena();state.apply(bet());state.apply(finish);state.apply({...finish,event_id:'other-finish'});assert.equal(state.users.get('u555').balanceCents,1010000);});
+test('conflicting final result is immutable',()=>{const state=arena();state.apply(finish);assert.throws(()=>state.apply({...finish,event_id:'other',winner:'AWAY'}));});
+test('premature finish is invalid',()=>assert.throws(()=>arena().apply({...finish,occurred_at:created.occurred_at})));
+test('replay from only Kafka events reconstructs exact state',()=>{const events=[created,bet(),finish,bet(),finish];const first=new Arena(),second=new Arena();events.forEach(e=>first.apply(e));JSON.parse(JSON.stringify(events)).forEach(e=>second.apply(e));assert.equal(first.digest(),second.digest());});
+test('two matches share a globally ordered balance',()=>{const state=arena();state.apply({...created,event_id:'created:m2',match_id:'m2'});state.apply(bet('a',{amount:7000}));state.apply(bet('b',{match_id:'m2',amount:7000}));assert.equal(state.bets.get('b').status,'REJECTED');assert.equal(state.users.get('u555').balanceCents,300000);});
+test('points never use floating point arithmetic',()=>{const state=arena();state.apply(bet('fraction',{amount:'0.01'}));state.apply(finish);assert.equal(state.users.get('u555').balanceCents,1000001);});
+test('invalid stakes fail fast',()=>{for(const value of [0,-1,1.001,'NaN','1e3',1000001])assert.throws(()=>cents(value));});
+test('winner strategy is reproducible',()=>{assert.equal(winnerFor('m1'),winnerFor('m1'));assert.ok(['HOME','AWAY'].includes(winnerFor('m2')));});
+test('public snapshots contain no credentials',()=>{const state=arena();assert.equal(state.snapshot('u555').user.balance,10000);assert.ok(!Object.hasOwn(state.snapshot('u555').user,'password'));});
+test('reused bet identifier cannot overwrite a settled bet',()=>{const state=arena();state.apply(bet());state.apply(finish);assert.throws(()=>state.apply({...bet(),event_id:'new-id'}));assert.equal(state.bets.get('b1').status,'WON');});
